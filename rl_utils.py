@@ -7,6 +7,19 @@ import queue
 import pickle
 from PIL import Image
 
+import cv2
+from carla_birdeye_view import BirdViewProducer, BirdViewCropType, PixelDimensions
+
+random.seed(777)
+
+def static_vars(**kwargs):
+    def decorate(func):
+        for k in kwargs:
+            setattr(func, k, kwargs[k])
+        return func
+    return decorate
+
+
 # ==============================================================================
 # -- Classes -------------------------------------------------------------------
 # ==============================================================================
@@ -415,7 +428,7 @@ class Memory(object):
 
         for i in range(self.pretrain_length):
 
-            if i % 500 == 0:
+            if i % 100 == 0:
                 print(i, "experiences stored")
             state = process_image(camera_queue)
             if autopilot:
@@ -444,8 +457,11 @@ class Memory(object):
         vehicle.set_autopilot(enabled = False)
 
     def save_memory(self, filename, object):
-        handle = open(filename, "wb")
-        pickle.dump(object, handle)
+        with open(filename, 'wb') as f:
+            pickle.dump(object, f)
+
+        # handle = open(filename, "wb")
+        # pickle.dump(object, handle)
 
     def load_memory(self, filename):
         with open(filename, 'rb') as f:
@@ -494,31 +510,58 @@ def map_from_control(control, action_space):
 
     return np.argmin(distances)
 
+
+@static_vars(spawn_point=carla.Transform(carla.Location(x=-42.4, y=-2.8), carla.Rotation(yaw=180)))
 def reset_environment(map, vehicle, sensors):
     ''' Set the vehicle velocities to 0 and move it to a spawn point'''
     vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
     time.sleep(1) # wait for the car to stop
-    spawn_points = map.get_spawn_points()
-    spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
-    vehicle.set_transform(spawn_point)
+
+    # spawn_points = map.get_spawn_points()
+    # spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
+    # vehicle.set_transform(spawn_point)
+
+    vehicle.set_transform(reset_environment.spawn_point)
+
     time.sleep(2) # wait for the car to spawn
     sensors.reset_sensors() # set sensor flags to False
 
 
-def process_image(queue):
+@static_vars(birdview_producer=None, vehicle=None)
+def process_image(queue, birdview_producer=None, vehicle=None):
     '''get the image from the buffer and process it. It's the state for vision-based systems'''
     image = queue.get()
     array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
     array = np.reshape(array, (image.height, image.width, 4))
     array = array[:, :, :3]
     array = array[:, :, ::-1]
+
+    image_rgb = array.copy()
+
     image = Image.fromarray(array).convert('L') # grayscale conversion
     image = np.array(image.resize((84, 84))) # convert to numpy array
     image = np.reshape(image, (84, 84, 1)) # reshape image
+
+    if birdview_producer is not None:
+        process_image.birdview_producer = birdview_producer
+        process_image.vehicle = vehicle
+    if process_image.birdview_producer is not None:
+        birdview = process_image.birdview_producer.produce(
+            agent_vehicle=process_image.vehicle  # carla.Actor (spawned vehicle)
+        )
+        # produces np.ndarray of shape (height, width, 3)
+        rgb = BirdViewProducer.as_rgb(birdview)
+        # cv2.imshow('BEV', cv2.resize(rgb, (640, 640)))
+        # cv2.imshow('rgb', cv2.resize(image_rgb, (640, 640)))
+        # print(rgb.shape)
+        # cv2.waitKey(0)
+
+        return rgb
+
     return image
 
 
-def compute_reward(vehicle, sensors):#, collision_sensor, lane_sensor):
+def compute_reward(vehicle, sensors):
     max_speed = 14
     min_speed = 2
     speed = vehicle.get_velocity()
@@ -531,9 +574,18 @@ def compute_reward(vehicle, sensors):#, collision_sensor, lane_sensor):
         speed_reward = -0.05
 
     if sensors.lane_crossed:
-        if sensors.lane_crossed_type == "'Broken'" or sensors.lane_crossed_type == "'NONE'":
+        if sensors.lane_crossed_type == "'Broken'":
+            lane_reward = -0.3
+        elif sensors.lane_crossed_type == "'Solid'" \
+                or sensors.lane_crossed_type == "'SolidSolid'" \
+                or sensors.lane_crossed_type == "'SolidBroken'":
             lane_reward = -0.5
-            sensors.lane_crossed = False
+        elif sensors.lane_crossed_type == "'None'":
+            lane_reward = -0.7
+
+        if lane_reward < 0:
+            print('penalty! lane crossed ({})'.format(sensors.lane_crossed_type))
+        sensors.lane_crossed = False
 
     if sensors.collision_flag:
         return -1

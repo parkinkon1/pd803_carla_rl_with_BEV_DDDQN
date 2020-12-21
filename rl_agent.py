@@ -1,5 +1,27 @@
 import sys
-sys.path.append("..") # Add parent directory to path
+sys.path.append("/opt/carla-simulator/PythonAPI/examples")
+import sys
+sys.path.append("..")
+
+import pickle
+import glob
+import os
+try:
+    sys.path.append(glob.glob('/opt/carla-simulator/PythonAPI/carla/dist/carla-*%d.%d-%s.egg' % (
+        sys.version_info.major,
+        sys.version_info.minor,
+        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
+except IndexError:
+    pass
+
+# try:
+#     sys.path.append(glob.glob('../../carla/dist/carla-*%d.%d-%s.egg' % (
+#         sys.version_info.major,
+#         sys.version_info.minor,
+#         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
+# except IndexError:
+#     pass
+
 import manual_control
 import carla
 import time
@@ -16,6 +38,9 @@ import rl_utils
 from rl_utils import DDDQNet, SumTree, Memory, map_action, reset_environment
 from rl_utils import process_image, compute_reward, isDone, get_split_batch
 from rl_config import hyperParameters
+
+import cv2
+from carla_birdeye_view import BirdViewProducer, BirdViewCropType, PixelDimensions
 
 
 def render(clock, world, display):
@@ -51,6 +76,15 @@ def init_tensorflow():
 
 
 def train_loop(rl_config, vehicle, map, sensors):
+    file_reward_hist = open('summary/reward_hist_{}.txt'.format(len(os.listdir('summary'))), 'wb')
+    birdview_producer = None
+    birdview_producer = BirdViewProducer(
+        client = carla.Client('127.0.0.1', 3000),  # carla.Client
+        target_size=PixelDimensions(width=84, height=84),
+        pixels_per_meter=4,
+        crop_type=BirdViewCropType.FRONT_AREA_ONLY
+    )
+    process_image(sensors.camera_queue, birdview_producer, vehicle)
 
     configProto = init_tensorflow()
     # instantiate the DQN target networks
@@ -69,6 +103,8 @@ def train_loop(rl_config, vehicle, map, sensors):
     # initialize memory and fill it with examples, for prioritized replay
     memory = Memory(rl_config.memory_size, rl_config.pretrain_length, rl_config.action_space)
     if rl_config.load_memory:
+        print(os.path.abspath(__file__))
+        print(rl_config.memory_load_path)
         memory = memory.load_memory(rl_config.memory_load_path)
         print("Memory Loaded")
     else:
@@ -92,6 +128,7 @@ def train_loop(rl_config, vehicle, map, sensors):
             # move the vehicle to a spawn_point and return state
             reset_environment(map, vehicle, sensors)
             state = process_image(sensors.camera_queue)
+
             done = False
             start = time.time()
             episode_reward = 0
@@ -165,9 +202,22 @@ def train_loop(rl_config, vehicle, map, sensors):
 
                 if done:
                     print(episode, 'episode finished. Episode total reward:', episode_reward)
+                    print('tau:', tau)
+                    pickle.dump(episode_reward, file_reward_hist)
                     break
 
+    file_reward_hist.close()
+
 def test_loop(rl_config, vehicle, map, sensors):
+    # birdview_producer = None
+    # birdview_producer = BirdViewProducer(
+    #     client=carla.Client('127.0.0.1', 3000),  # carla.Client
+    #     target_size=PixelDimensions(width=84, height=84),
+    #     pixels_per_meter=4,
+    #     crop_type=BirdViewCropType.FRONT_AREA_ONLY
+    # )
+    # process_image(sensors.camera_queue, birdview_producer, vehicle)
+
     configProto = init_tensorflow()
     with tf.Session(config=configProto) as sess:
 
@@ -241,7 +291,8 @@ def render_loop(args):
             pygame.HWSURFACE | pygame.DOUBLEBUF)
 
         hud = manual_control.HUD(args.width, args.height)
-        world = manual_control.World(client.get_world(), hud, args.filter, args.rolename)
+        # world = manual_control.World(client.get_world(), hud, args.filter, args.rolename)
+        world = manual_control.World(client.get_world(), hud, args)
 
         p = Process(target=control_loop, args=(world.player.id, args.host, args.port, args.test, ))
         p.start()
@@ -282,7 +333,7 @@ def main():
     argparser.add_argument(
         '-p', '--port',
         metavar='P',
-        default=2000,
+        default=3000,
         type=int,
         help='TCP port to listen to (default: 2000)')
     argparser.add_argument(
@@ -304,6 +355,11 @@ def main():
         metavar='NAME',
         default='hero',
         help='actor role name (default: "hero")')
+    argparser.add_argument(
+        '--gamma',
+        default=2.2,
+        type=float,
+        help='Gamma correction of the camera (default: 2.2)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]

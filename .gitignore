@@ -102,3 +102,19 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+
+
+
+summary/
+results/
+.empty
+.idea
+model*/
+replay_memory/
+birdview_v2_cache/
+__pycache__
+
+
+
+
